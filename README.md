@@ -170,3 +170,5 @@ The pipeline is designed to separate collection, processing, enrichment, persist
 ## License
 
 This project is intended for educational, research, and defensive cybersecurity purposes.
+
+[![Tests](https://github.com/ATAF-png/threat-intel-automation/actions/workflows/tests.yml/badge.svg)](https://github.com/ATAF-png/threat-intel-automation/actions/workflows/tests.yml)
