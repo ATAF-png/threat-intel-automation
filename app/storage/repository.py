@@ -7,6 +7,14 @@ from app.processing.models import Indicator
 DEFAULT_DB_PATH = Path("data/threat_intel.db")
 
 
+SEVERITY_RANK = {
+    "low": 0,
+    "medium": 1,
+    "high": 2,
+    "critical": 3,
+}
+
+
 def save_indicator(
     indicator: Indicator,
     db_path: Path = DEFAULT_DB_PATH,
@@ -58,6 +66,14 @@ def save_indicator(
                 indicator.confidence,
             )
 
+            existing_severity = existing["severity"] or "low"
+            severity = (
+                indicator.severity.value
+                if SEVERITY_RANK[indicator.severity.value]
+                > SEVERITY_RANK[existing_severity]
+                else existing_severity
+            )
+
             existing_first_seen = existing["first_seen"]
 
             if existing_first_seen and first_seen:
@@ -68,8 +84,26 @@ def save_indicator(
             elif existing_first_seen:
                 first_seen = existing_first_seen
 
-            if not last_seen:
-                last_seen = existing["last_seen"]
+            existing_last_seen = existing["last_seen"]
+
+            if existing_last_seen and last_seen:
+                last_seen = max(
+                    existing_last_seen,
+                    last_seen,
+                )
+            elif existing_last_seen:
+                last_seen = existing_last_seen
+
+            existing_enrichment = json.loads(
+                existing["enrichment"] or "{}"
+            )
+
+            incoming_enrichment = indicator.enrichment or {}
+
+            merged_enrichment = {
+                **existing_enrichment,
+                **incoming_enrichment,
+            }
 
             connection.execute(
                 """
@@ -88,10 +122,10 @@ def save_indicator(
                     json.dumps(sorted(merged_sources)),
                     json.dumps(sorted(merged_tags)),
                     confidence,
-                    indicator.severity.value,
+                    severity,
                     first_seen,
                     last_seen,
-                    enrichment_json,
+                    json.dumps(merged_enrichment),
                     existing["id"],
                 ),
             )

@@ -26,6 +26,7 @@ def analyze_indicator(
     }
 
     score = calculate_score(enrichment_results)
+    score = max(indicator.confidence, score)
 
     indicator.confidence = score
     indicator.severity = severity_from_score(score)
@@ -43,3 +44,5 @@ def analyze_indicator(
     )
 
     return indicator
+
+

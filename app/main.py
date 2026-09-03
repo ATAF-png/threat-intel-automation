@@ -1,10 +1,13 @@
+from dotenv import load_dotenv
+load_dotenv()
+
 from pathlib import Path
 import argparse
 import json
 
 from app.enrichment.manager import EnrichmentManager
 from app.enrichment.virustotal import VirusTotalProvider
-from app.processing.ingest import ingest_urlhaus_with_summary
+from app.processing.ingest import ingest_urlhaus_with_summary, ingest_threatfox_with_summary, ingest_malwarebazaar_with_summary
 from app.report import export_csv, export_json
 from app.storage.repository import (
     get_indicator,
@@ -19,19 +22,39 @@ def run_ingestion(
     db_path: Path = DEFAULT_DB_PATH,
     limit: int = 10,
     delay_seconds: float = 1,
+    source: str = "urlhaus",
+    days: int = 1,
 ) -> None:
-    print("[*] Starting threat intelligence ingestion...")
+    print(f"[*] Starting threat intelligence ingestion: {source}")
 
     manager = EnrichmentManager(
         providers=[VirusTotalProvider()]
     )
 
-    summary = ingest_urlhaus_with_summary(
-        db_path=db_path,
-        enrichment_manager=manager,
-        limit=limit,
-        delay_seconds=delay_seconds,
-    )
+    if source == "urlhaus":
+        summary = ingest_urlhaus_with_summary(
+            db_path=db_path,
+            enrichment_manager=manager,
+            limit=limit,
+            delay_seconds=delay_seconds,
+        )
+    elif source == "threatfox":
+        summary = ingest_threatfox_with_summary(
+            db_path=db_path,
+            enrichment_manager=manager,
+            limit=limit,
+            days=days,
+            delay_seconds=delay_seconds,
+        )
+    elif source == "malwarebazaar":
+        summary = ingest_malwarebazaar_with_summary(
+            db_path=db_path,
+            enrichment_manager=manager,
+            limit=limit,
+            delay_seconds=delay_seconds,
+        )
+    else:
+        raise ValueError(f"Unsupported source: {source}")
 
     print(
         f"[+] Processed: {summary['processed']} | "
@@ -388,6 +411,18 @@ def build_parser() -> argparse.ArgumentParser:
     ingest_parser.add_argument("--limit", type=int, default=10)
     ingest_parser.add_argument("--delay", type=float, default=1)
     ingest_parser.add_argument(
+        "--source",
+        choices=["urlhaus", "threatfox", "malwarebazaar"],
+        default="urlhaus",
+        help="Threat intelligence source",
+    )
+    ingest_parser.add_argument(
+        "--days",
+        type=int,
+        default=1,
+        help="ThreatFox lookback period in days (1-7)",
+    )
+    ingest_parser.add_argument(
         "--db",
         type=Path,
         default=DEFAULT_DB_PATH,
@@ -536,6 +571,8 @@ def main() -> None:
             db_path=args.db,
             limit=args.limit,
             delay_seconds=args.delay,
+            source=args.source,
+            days=args.days,
         )
 
     elif args.command == "show":
@@ -600,3 +637,12 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+
+
+
+
+
+
+

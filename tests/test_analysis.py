@@ -66,3 +66,31 @@ def test_analysis_preserves_provider_failure():
     assert analyzed.confidence == 10
     assert analyzed.enrichment["failed-provider"]["available"] is False
     assert analyzed.enrichment["failed-provider"]["error"] == "timeout"
+
+def test_analysis_preserves_existing_confidence():
+    from app.enrichment.models import EnrichmentResult
+    from app.processing.analysis import analyze_indicator
+    from app.processing.models import Indicator, IndicatorType
+
+    indicator = Indicator(
+        value="evil.example.com",
+        indicator_type=IndicatorType.DOMAIN,
+        sources=["threatfox"],
+        confidence=95,
+    )
+
+    results = [
+        EnrichmentResult(
+            provider="virustotal",
+            available=True,
+            reputation_score=10,
+            classification="unknown",
+        )
+    ]
+
+    analyzed = analyze_indicator(
+        indicator=indicator,
+        enrichment_results=results,
+    )
+
+    assert analyzed.confidence == 95
