@@ -285,3 +285,57 @@ def _connection(db_path: Path):
     from app.storage.database import get_connection
 
     return get_connection(db_path)
+
+def get_correlated_indicators(
+    db_path: Path = DEFAULT_DB_PATH,
+    limit: int = 50,
+) -> list[dict]:
+    """Return indicators observed by multiple intelligence sources."""
+
+    from app.storage.database import get_connection
+
+    conn = get_connection(db_path)
+    try:
+        rows = conn.execute(
+            """
+            SELECT
+                id,
+                value,
+                indicator_type,
+                severity,
+                confidence,
+                sources,
+                tags,
+                enrichment
+            FROM indicators
+            ORDER BY confidence DESC, id DESC
+            """
+        ).fetchall()
+    finally:
+        conn.close()
+
+    results = []
+
+    for row in rows:
+        sources = json.loads(row["sources"] or "[]")
+
+        if len(set(sources)) < 2:
+            continue
+
+        results.append(
+            {
+                "id": row["id"],
+                "value": row["value"],
+                "indicator_type": row["indicator_type"],
+                "severity": row["severity"],
+                "confidence": row["confidence"],
+                "sources": sources,
+                "tags": json.loads(row["tags"] or "[]"),
+                "enrichment": json.loads(row["enrichment"] or "{}"),
+            }
+        )
+
+        if len(results) >= limit:
+            break
+
+    return results

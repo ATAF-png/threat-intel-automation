@@ -1,5 +1,5 @@
 from dotenv import load_dotenv
-load_dotenv()
+load_dotenv(override=True)
 
 from pathlib import Path
 import argparse
@@ -13,6 +13,7 @@ from app.storage.repository import (
     get_indicator,
     get_indicator_summary,
     list_indicators,
+    get_correlated_indicators,
 )
 
 DEFAULT_DB_PATH = Path("data/threat_intel.db")
@@ -53,6 +54,61 @@ def run_ingestion(
             limit=limit,
             delay_seconds=delay_seconds,
         )
+    elif source == "all":
+        summaries = {}
+
+        feeds = {
+            "urlhaus": lambda: ingest_urlhaus_with_summary(
+                db_path=db_path,
+                enrichment_manager=manager,
+                limit=limit,
+                delay_seconds=delay_seconds,
+            ),
+            "threatfox": lambda: ingest_threatfox_with_summary(
+                db_path=db_path,
+                enrichment_manager=manager,
+                limit=limit,
+                days=days,
+                delay_seconds=delay_seconds,
+            ),
+            "malwarebazaar": lambda: ingest_malwarebazaar_with_summary(
+                db_path=db_path,
+                enrichment_manager=manager,
+                limit=limit,
+                delay_seconds=delay_seconds,
+            ),
+        }
+
+        for feed, ingest_func in feeds.items():
+            try:
+                summaries[feed] = ingest_func()
+            except Exception as exc:
+                summaries[feed] = {
+                    "processed": 0,
+                    "enriched": 0,
+                    "enrichment_failed": 0,
+                    "malicious": 0,
+                    "suspicious": 0,
+                    "benign": 0,
+                    "unknown": 0,
+                    "rate_limited": False,
+                    "errors": [{"error": str(exc)}],
+                }
+
+                print(f"[!] {feed.upper()} failed: {exc}")
+
+        for feed, feed_summary in summaries.items():
+            print()
+            print(f"[*] {feed.upper()}")
+            print(f"    Processed: {feed_summary.get('processed', 0)}")
+            print(f"    Enriched:  {feed_summary.get('enriched', 0)}")
+            print(f"    Malicious: {feed_summary.get('malicious', 0)}")
+            print(f"    Suspicious: {feed_summary.get('suspicious', 0)}")
+            print(f"    Benign:    {feed_summary.get('benign', 0)}")
+            print(f"    Unknown:   {feed_summary.get('unknown', 0)}")
+            print(f"    Errors:    {len(feed_summary.get('errors', []))}")
+
+        return
     else:
         raise ValueError(f"Unsupported source: {source}")
 
@@ -412,7 +468,7 @@ def build_parser() -> argparse.ArgumentParser:
     ingest_parser.add_argument("--delay", type=float, default=1)
     ingest_parser.add_argument(
         "--source",
-        choices=["urlhaus", "threatfox", "malwarebazaar"],
+        choices=["urlhaus", "threatfox", "malwarebazaar", "all"],
         default="urlhaus",
         help="Threat intelligence source",
     )
@@ -458,6 +514,16 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_DB_PATH,
     )
 
+    correlated_parser = subparsers.add_parser(
+        "correlated",
+        help="Show indicators observed by multiple intelligence sources",
+    )
+    correlated_parser.add_argument("--limit", type=int, default=20)
+    correlated_parser.add_argument(
+        "--db",
+        type=Path,
+        default=DEFAULT_DB_PATH,
+    )
     summary_parser = subparsers.add_parser(
         "summary",
         help="Display database threat intelligence summary",
@@ -584,6 +650,27 @@ def main() -> None:
             as_json=args.json,
         )
 
+    elif args.command == "correlated":
+        indicators = get_correlated_indicators(
+            db_path=args.db,
+            limit=args.limit,
+        )
+
+        print(f"[*] Database: {args.db}")
+        print(f"[*] Correlated indicators: {len(indicators)}")
+
+        if not indicators:
+            print("[+] No indicators found across multiple sources.")
+        else:
+            for indicator in indicators:
+                print()
+                print(f"ID:         {indicator['id']}")
+                print(f"Value:      {indicator['value']}")
+                print(f"Type:       {indicator['indicator_type']}")
+                print(f"Severity:   {indicator['severity']}")
+                print(f"Confidence: {indicator['confidence']}")
+                print(f"Sources:    {', '.join(indicator['sources'])}")
+                print(f"Tags:       {', '.join(indicator['tags'])}")
     elif args.command == "summary":
         show_summary(
             db_path=args.db,
@@ -637,6 +724,13 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+
+
+
+
+
 
 
 

@@ -3,8 +3,9 @@ from pathlib import Path
 from app.processing.models import Indicator, IndicatorType
 from app.storage.database import initialize_database
 from app.storage.repository import (
+    get_correlated_indicators,
     get_indicator,
-    list_indicators,
+list_indicators,
     save_indicator,
 )
 
@@ -71,3 +72,35 @@ def test_same_indicator_from_multiple_sources_is_merged(
     ) == {"OTX", "URLhaus"}
 
     assert indicators[0]["confidence"] == 90
+
+def test_get_correlated_indicators(tmp_path: Path):
+    db_path = tmp_path / "test.db"
+
+    initialize_database(db_path)
+
+    indicator_one = Indicator(
+        value="198.51.100.10",
+        indicator_type=IndicatorType.IPV4,
+        sources=["urlhaus"],
+        confidence=70,
+    )
+
+    indicator_two = Indicator(
+        value="198.51.100.10",
+        indicator_type=IndicatorType.IPV4,
+        sources=["threatfox"],
+        confidence=90,
+    )
+
+    save_indicator(indicator_one, db_path)
+    save_indicator(indicator_two, db_path)
+
+    results = get_correlated_indicators(
+        db_path=db_path,
+        limit=10,
+    )
+
+    assert len(results) == 1
+    assert results[0]["value"] == "198.51.100.10"
+    assert set(results[0]["sources"]) == {"urlhaus", "threatfox"}
+    assert results[0]["confidence"] == 90

@@ -185,3 +185,23 @@ def test_cli_report_json_flag():
 
     assert args.command == "report"
     assert args.json is True
+
+def test_cli_ingest_all_sources():
+    parser = build_parser()
+
+    args = parser.parse_args(
+        [
+            "ingest",
+            "--source",
+            "all",
+            "--limit",
+            "5",
+            "--days",
+            "2",
+        ]
+    )
+
+    assert args.command == "ingest"
+    assert args.source == "all"
+    assert args.limit == 5
+    assert args.days == 2
