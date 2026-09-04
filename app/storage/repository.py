@@ -1,4 +1,5 @@
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 from app.processing.models import Indicator
@@ -38,6 +39,8 @@ def save_indicator(
     )
 
     created_at = indicator.created_at.isoformat()
+
+    last_ingested_at = datetime.now(timezone.utc).isoformat()
 
     with _get_initialized_connection(db_path) as connection:
         existing = connection.execute(
@@ -115,7 +118,8 @@ def save_indicator(
                     severity = ?,
                     first_seen = ?,
                     last_seen = ?,
-                    enrichment = ?
+                    enrichment = ?,
+                    last_ingested_at = ?
                 WHERE id = ?
                 """,
                 (
@@ -126,6 +130,7 @@ def save_indicator(
                     first_seen,
                     last_seen,
                     json.dumps(merged_enrichment),
+                    last_ingested_at,
                     existing["id"],
                 ),
             )
@@ -145,9 +150,10 @@ def save_indicator(
                 first_seen,
                 last_seen,
                 enrichment,
-                created_at
+                created_at,
+                last_ingested_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 indicator.value,
@@ -160,6 +166,7 @@ def save_indicator(
                 last_seen,
                 enrichment_json,
                 created_at,
+                last_ingested_at,
             ),
         )
 
@@ -188,10 +195,22 @@ def get_indicator(
 
 def list_indicators(
     db_path: Path = DEFAULT_DB_PATH,
+    since: str | None = None,
 ):
-    """Return all stored indicators."""
+    """Return stored indicators, optionally limited to a recent ingestion window."""
 
     with _get_initialized_connection(db_path) as connection:
+        if since:
+            return connection.execute(
+                """
+                SELECT *
+                FROM indicators
+                WHERE last_ingested_at >= ?
+                ORDER BY last_ingested_at DESC, created_at DESC
+                """,
+                (since,),
+            ).fetchall()
+
         return connection.execute(
             """
             SELECT *
@@ -286,31 +305,53 @@ def _connection(db_path: Path):
 
     return get_connection(db_path)
 
+
 def get_correlated_indicators(
     db_path: Path = DEFAULT_DB_PATH,
     limit: int = 50,
+    since: str | None = None,
 ) -> list[dict]:
     """Return indicators observed by multiple intelligence sources."""
 
     from app.storage.database import get_connection
 
     conn = get_connection(db_path)
+
     try:
-        rows = conn.execute(
-            """
-            SELECT
-                id,
-                value,
-                indicator_type,
-                severity,
-                confidence,
-                sources,
-                tags,
-                enrichment
-            FROM indicators
-            ORDER BY confidence DESC, id DESC
-            """
-        ).fetchall()
+        if since:
+            rows = conn.execute(
+                """
+                SELECT
+                    id,
+                    value,
+                    indicator_type,
+                    severity,
+                    confidence,
+                    sources,
+                    tags,
+                    enrichment
+                FROM indicators
+                WHERE last_ingested_at >= ?
+                ORDER BY confidence DESC, id DESC
+                """,
+                (since,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT
+                    id,
+                    value,
+                    indicator_type,
+                    severity,
+                    confidence,
+                    sources,
+                    tags,
+                    enrichment
+                FROM indicators
+                ORDER BY confidence DESC, id DESC
+                """
+            ).fetchall()
     finally:
         conn.close()
 

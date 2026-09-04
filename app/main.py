@@ -1,7 +1,8 @@
-from dotenv import load_dotenv
+﻿from dotenv import load_dotenv
 load_dotenv(override=True)
 
 from pathlib import Path
+from datetime import datetime, timezone
 import argparse
 import json
 
@@ -9,6 +10,7 @@ from app.enrichment.manager import EnrichmentManager
 from app.enrichment.virustotal import VirusTotalProvider
 from app.processing.ingest import ingest_urlhaus_with_summary, ingest_threatfox_with_summary, ingest_malwarebazaar_with_summary
 from app.report import export_csv, export_json
+from app.reporting.pdf import generate_pdf_report
 from app.storage.repository import (
     get_indicator,
     get_indicator_summary,
@@ -19,6 +21,62 @@ from app.storage.repository import (
 DEFAULT_DB_PATH = Path("data/threat_intel.db")
 
 
+def start_ingestion_run(
+    db_path: Path,
+    source: str,
+    started_at: str,
+) -> int:
+    from app.storage.database import get_connection
+
+    with get_connection(db_path) as connection:
+        cursor = connection.execute(
+            """
+            INSERT INTO ingestion_runs (
+                source,
+                started_at,
+                status
+            )
+            VALUES (?, ?, 'running')
+            """,
+            (source, started_at),
+        )
+        connection.commit()
+        return cursor.lastrowid
+
+
+def complete_ingestion_run(
+    db_path: Path,
+    run_id: int,
+    summary: dict,
+    status: str = "completed",
+    error: str | None = None,
+) -> None:
+    from app.storage.database import get_connection
+
+    with get_connection(db_path) as connection:
+        connection.execute(
+            """
+            UPDATE ingestion_runs
+            SET
+                completed_at = ?,
+                status = ?,
+                processed = ?,
+                error = ?
+            WHERE id = ?
+            """,
+            (
+                datetime.now(timezone.utc).isoformat(),
+                status,
+                summary.get("processed", 0),
+                error,
+                run_id,
+            ),
+        )
+        connection.commit()
+
+
+
+
 def run_ingestion(
     db_path: Path = DEFAULT_DB_PATH,
     limit: int = 10,
@@ -27,6 +85,14 @@ def run_ingestion(
     days: int = 1,
 ) -> None:
     print(f"[*] Starting threat intelligence ingestion: {source}")
+
+    ingestion_started_at = datetime.now(timezone.utc).isoformat()
+
+    run_id = start_ingestion_run(
+        db_path=db_path,
+        source=source,
+        started_at=ingestion_started_at,
+    )
 
     manager = EnrichmentManager(
         providers=[VirusTotalProvider()]
@@ -97,6 +163,21 @@ def run_ingestion(
 
                 print(f"[!] {feed.upper()} failed: {exc}")
 
+        total_processed = sum(
+            feed_summary.get("processed", 0)
+            for feed_summary in summaries.values()
+        )
+
+        combined_summary = {
+            "processed": total_processed,
+        }
+
+        complete_ingestion_run(
+            db_path=db_path,
+            run_id=run_id,
+            summary=combined_summary,
+        )
+
         for feed, feed_summary in summaries.items():
             print()
             print(f"[*] {feed.upper()}")
@@ -132,6 +213,12 @@ def run_ingestion(
         )
     elif summary["errors"]:
         print(f"[!] Errors: {len(summary['errors'])}")
+
+    complete_ingestion_run(
+        db_path=db_path,
+        run_id=run_id,
+        summary=summary,
+    )
 
 
 def show_indicators(
@@ -320,12 +407,13 @@ def report_indicators(
     export: Path | None = None,
     export_format: str | None = None,
     as_json: bool = False,
+    since: str | None = None,
 ) -> None:
     from collections import Counter
 
     from app.report import get_classification, row_to_dict
 
-    rows = list_indicators(db_path)
+    rows = list_indicators(db_path, since=since)
 
     if severity:
         rows = [
@@ -604,6 +692,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     report_parser.add_argument(
+        "--pdf",
+        action="store_true",
+        help="Generate an AI-powered PDF report",
+    )
+    report_parser.add_argument(
+        "--fresh",
+        action="store_true",
+        help="Report only indicators ingested during the latest ingestion run",
+    )
+    report_parser.add_argument(
         "--json",
         action="store_true",
         help="Output the report as JSON",
@@ -708,15 +806,55 @@ def main() -> None:
         if args.export and not args.format:
             parser.error("--export requires --format")
 
-        report_indicators(
-            db_path=args.db,
-            severity=args.severity,
-            classification=args.classification,
-            limit=args.limit,
-            export=args.export,
-            export_format=args.format,
-            as_json=args.json,
-        )
+        since = None
+
+        if args.fresh:
+            from app.storage.database import get_connection
+
+            connection = get_connection(args.db)
+
+            try:
+                latest_run = connection.execute(
+                    """
+                    SELECT started_at
+                    FROM ingestion_runs
+                    WHERE status = 'completed'
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """
+                ).fetchone()
+            finally:
+                connection.close()
+
+            if latest_run is None:
+                parser.error(
+                    "--fresh requires at least one completed ingestion run"
+                )
+
+            since = latest_run["started_at"]
+
+            print(
+                f"[*] Fresh report scope: indicators ingested since {since}"
+            )
+
+        if args.pdf:
+            output_path = generate_pdf_report(
+                db_path=args.db,
+                limit=args.limit,
+                since=since,
+            )
+            print(f"[+] PDF report created: {output_path}")
+        else:
+            report_indicators(
+                db_path=args.db,
+                severity=args.severity,
+                classification=args.classification,
+                limit=args.limit,
+                export=args.export,
+                export_format=args.format,
+                as_json=args.json,
+                since=since,
+            )
 
     else:
         parser.print_help()
@@ -724,6 +862,10 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+
+
 
 
 

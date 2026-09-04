@@ -38,10 +38,26 @@ def initialize_database(db_path: Path = DEFAULT_DB_PATH) -> None:
                 enrichment TEXT NOT NULL DEFAULT '{}',
 
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                last_ingested_at TEXT,
 
                 UNIQUE(value, indicator_type)
             )
             """
         )
+
+        columns = {
+            row["name"]
+            for row in connection.execute(
+                "PRAGMA table_info(indicators)"
+            ).fetchall()
+        }
+
+        if "last_ingested_at" not in columns:
+            connection.execute(
+                """
+                ALTER TABLE indicators
+                ADD COLUMN last_ingested_at TEXT
+                """
+            )
 
         connection.commit()

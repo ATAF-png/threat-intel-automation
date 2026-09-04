@@ -52,7 +52,10 @@ class VirusTotalProvider(EnrichmentProvider):
                     provider=self.name,
                     available=True,
                     classification="unknown",
-                    details={"status": 404},
+                    details={
+                        "status": 404,
+                        "message": "VirusTotal has no record for this indicator.",
+                    },
                 )
 
             if exc.code == 429:
@@ -62,9 +65,7 @@ class VirusTotalProvider(EnrichmentProvider):
                     error="VirusTotal rate limit exceeded",
                     details={
                         "status": 429,
-                        "retry_after": exc.headers.get(
-                            "Retry-After"
-                        ),
+                        "retry_after": exc.headers.get("Retry-After"),
                     },
                 )
 
@@ -101,8 +102,22 @@ class VirusTotalProvider(EnrichmentProvider):
 
             return f"{base_url}/urls/{encoded}"
 
+        indicator_type = indicator.indicator_type.value
+
+        plural_map = {
+            "ip": "ip_addresses",
+            "domain": "domains",
+            "hash": "files",
+            "file": "files",
+        }
+
+        collection = plural_map.get(
+            indicator_type,
+            f"{indicator_type}s",
+        )
+
         return (
-            f"{base_url}/{indicator.indicator_type.value}s/"
+            f"{base_url}/{collection}/"
             f"{urllib.parse.quote(indicator.value, safe='')}"
         )
 
@@ -113,26 +128,32 @@ class VirusTotalProvider(EnrichmentProvider):
         data = payload.get("data", {})
         attributes = data.get("attributes", {})
 
-        stats = attributes.get("last_analysis_stats", {})
+        stats = attributes.get(
+            "last_analysis_stats",
+            {},
+        )
 
-        malicious = stats.get("malicious", 0)
-        suspicious = stats.get("suspicious", 0)
-        harmless = stats.get("harmless", 0)
-        undetected = stats.get("undetected", 0)
+        malicious = self._safe_int(stats.get("malicious"))
+        suspicious = self._safe_int(stats.get("suspicious"))
+        harmless = self._safe_int(stats.get("harmless"))
+        undetected = self._safe_int(stats.get("undetected"))
+        timeout = self._safe_int(stats.get("timeout"))
 
         total = (
             malicious
             + suspicious
             + harmless
             + undetected
+            + timeout
         )
 
         if total:
-            reputation_score = round(
-                ((malicious + suspicious) / total) * 100
+            detection_ratio = round(
+                ((malicious + suspicious) / total) * 100,
+                1,
             )
         else:
-            reputation_score = None
+            detection_ratio = None
 
         if malicious > 0:
             classification = "malicious"
@@ -143,21 +164,261 @@ class VirusTotalProvider(EnrichmentProvider):
         else:
             classification = "unknown"
 
-        tags = attributes.get("tags", [])
+        tags = self._clean_list(
+            attributes.get("tags", [])
+        )
+
+        scanner_detections = self._extract_detections(
+            attributes.get(
+                "last_analysis_results",
+                {},
+            )
+        )
+
+        malware_names = self._extract_threat_names(
+            scanner_detections
+        )
+
+        categories = attributes.get(
+            "categories",
+            {},
+        )
 
         details = {
-            "analysis_stats": stats,
+            # Core VT assessment
+            "status": 200,
+            "analysis_stats": {
+                "malicious": malicious,
+                "suspicious": suspicious,
+                "harmless": harmless,
+                "undetected": undetected,
+                "timeout": timeout,
+                "total": total,
+            },
+            "detection_ratio": detection_ratio,
             "reputation": attributes.get("reputation"),
+            "total_votes": attributes.get("total_votes", {}),
+
+            # Explicit intelligence labels
+            "tags": tags,
+            "categories": categories,
+            "malware_names": malware_names,
+
+            # Scanner-level evidence
+            "scanner_detections": scanner_detections,
+            "malicious_detections": [
+                detection
+                for detection in scanner_detections
+                if detection["category"] == "malicious"
+            ],
+            "suspicious_detections": [
+                detection
+                for detection in scanner_detections
+                if detection["category"] == "suspicious"
+            ],
+
+            # Timing
+            "first_submission_date": attributes.get(
+                "first_submission_date"
+            ),
+            "last_submission_date": attributes.get(
+                "last_submission_date"
+            ),
             "last_analysis_date": attributes.get(
                 "last_analysis_date"
+            ),
+            "last_modification_date": attributes.get(
+                "last_modification_date"
+            ),
+            "times_submitted": attributes.get(
+                "times_submitted"
+            ),
+
+            # URL/web infrastructure
+            "original_url": attributes.get("url"),
+            "last_final_url": attributes.get(
+                "last_final_url"
+            ),
+            "redirection_chain": self._clean_list(
+                attributes.get(
+                    "redirection_chain",
+                    [],
+                )
+            ),
+            "last_http_response_code": attributes.get(
+                "last_http_response_code"
+            ),
+            "last_http_response_content_length": attributes.get(
+                "last_http_response_content_length"
+            ),
+            "last_http_response_content_sha256": attributes.get(
+                "last_http_response_content_sha256"
+            ),
+            "title": attributes.get("title"),
+            "has_content": attributes.get("has_content"),
+
+            # Web content/context
+            "outgoing_links": self._clean_list(
+                attributes.get(
+                    "outgoing_links",
+                    [],
+                )
+            ),
+            "html_meta": attributes.get(
+                "html_meta",
+                {},
+            ),
+            "main_brand": attributes.get(
+                "main_brand"
+            ),
+            "targeted_brand": attributes.get(
+                "targeted_brand",
+                {},
+            ),
+
+            # Tracking/context
+            "trackers": attributes.get(
+                "trackers",
+                {},
             ),
         }
 
         return EnrichmentResult(
             provider=self.name,
             available=True,
-            reputation_score=reputation_score,
+            reputation_score=self._normalise_reputation(
+                attributes.get("reputation")
+            ),
             classification=classification,
             tags=tags,
             details=details,
         )
+
+    @staticmethod
+    def _safe_int(value) -> int:
+        try:
+            return int(value or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    @staticmethod
+    def _normalise_reputation(
+        value,
+    ) -> int | None:
+        """
+        Convert VT's community reputation score into
+        the existing 0-100 enrichment field.
+
+        VT reputation itself may be negative or positive,
+        so it is preserved separately in details.
+        """
+        if value is None:
+            return None
+
+        try:
+            reputation = int(value)
+        except (TypeError, ValueError):
+            return None
+
+        if reputation <= 0:
+            return 0
+
+        return min(reputation, 100)
+
+    @staticmethod
+    def _clean_list(value) -> list[str]:
+        if not isinstance(value, list):
+            return []
+
+        return [
+            str(item)
+            for item in value
+            if item is not None
+        ]
+
+    @staticmethod
+    def _extract_detections(
+        results: dict,
+    ) -> list[dict]:
+        detections = []
+
+        if not isinstance(results, dict):
+            return detections
+
+        for engine_name, result in results.items():
+            if not isinstance(result, dict):
+                continue
+
+            category = result.get(
+                "category",
+                "unknown",
+            )
+
+            detections.append(
+                {
+                    "engine": result.get(
+                        "engine_name",
+                        engine_name,
+                    ),
+                    "category": category,
+                    "method": result.get(
+                        "method"
+                    ),
+                    "result": result.get(
+                        "result"
+                    ),
+                }
+            )
+
+        detections.sort(
+            key=lambda item: (
+                item["category"] != "malicious",
+                item["engine"],
+            )
+        )
+
+        return detections
+
+    @staticmethod
+    def _extract_threat_names(
+        detections: list[dict],
+    ) -> list[str]:
+        """
+        Extract explicit threat/malware names returned
+        by scanners.
+
+        This intentionally does NOT infer a family from
+        an IOC path, filename, or vague wording.
+        """
+        names = []
+
+        for detection in detections:
+            if detection["category"] not in {
+                "malicious",
+                "suspicious",
+            }:
+                continue
+
+            result = detection.get("result")
+
+            if not result:
+                continue
+
+            result = str(result).strip()
+
+            if not result:
+                continue
+
+            if result.lower() in {
+                "malicious",
+                "suspicious",
+                "phishing",
+                "clean",
+                "unrated",
+            }:
+                continue
+
+            if result not in names:
+                names.append(result)
+
+        return names[:50]
